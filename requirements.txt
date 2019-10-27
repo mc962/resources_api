@@ -1,3 +1,5 @@
+python-dateutil
+flask
 algoliasearch>=2.0,<3.0
 flake8==3.7.8
 Flask-Limiter==1.1.0

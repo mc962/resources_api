@@ -31,10 +31,10 @@ def is_user_oc_member(email, password):
     return bool(response.json().get('token'))
 
 
-def log_request(request, key):
-    method = request.method
-    path = request.path
+def log_request(current_request, key):
+    method = current_request.method
+    path = current_request.path
     user = key.email
-    payload = request.json
+    payload = current_request.json
     logger = create_logger if method == "POST" else update_logger
     logger.info(f"User: {user} Route: {path} Payload: {payload}")

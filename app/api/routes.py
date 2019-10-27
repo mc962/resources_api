@@ -1,17 +1,18 @@
+from datetime import datetime
+
+from algoliasearch.exceptions import AlgoliaUnreachableHostException, AlgoliaException
+from dateutil import parser
 from flask import request, redirect
+from prometheus_client import Counter, Summary
 from sqlalchemy import or_, func
 from sqlalchemy.exc import IntegrityError
-from algoliasearch.exceptions import AlgoliaUnreachableHostException, AlgoliaException
+
+import app.utils as utils
+from app import Config, db, index
 from app.api import bp
 from app.api.auth import is_user_oc_member, authenticate
 from app.api.validations import validate_resource, requires_body
 from app.models import Language, Resource, Category, Key
-from app import Config, db, index
-from dateutil import parser
-from datetime import datetime
-from prometheus_client import Counter, Summary
-import app.utils as utils
-
 
 # Metrics
 failures_counter = Counter('my_failures', 'Number of exceptions raised')
@@ -44,8 +45,8 @@ def post_resources():
 @latency_summary.time()
 @failures_counter.count_exceptions()
 @bp.route('/resources/<int:id>', methods=['GET'], endpoint='get_resource')
-def resource(id):
-    return get_resource(id)
+def resource(resource_id):
+    return get_resource(resource_id)
 
 
 @latency_summary.time()
@@ -53,33 +54,33 @@ def resource(id):
 @bp.route('/resources/<int:id>', methods=['PUT'], endpoint='update_resource')
 @requires_body
 @authenticate
-def put_resource(id):
-    validation_errors = validate_resource(request, id)
+def put_resource(resource_id):
+    validation_errors = validate_resource(request, resource_id)
 
     if validation_errors:
         return utils.standardize_response(payload=validation_errors, status_code=422)
-    return update_resource(id, request.get_json(), db)
+    return update_resource(resource_id, request.get_json(), db)
 
 
 @latency_summary.time()
 @failures_counter.count_exceptions()
 @bp.route('/resources/<int:id>/upvote', methods=['PUT'])
-def upvote(id):
-    return update_votes(id, 'upvotes')
+def upvote(resource_id):
+    return update_votes(resource_id, 'upvotes')
 
 
 @latency_summary.time()
 @failures_counter.count_exceptions()
 @bp.route('/resources/<int:id>/downvote', methods=['PUT'])
-def downvote(id):
-    return update_votes(id, 'downvotes')
+def downvote(resource_id):
+    return update_votes(resource_id, 'downvotes')
 
 
 @latency_summary.time()
 @failures_counter.count_exceptions()
 @bp.route('/resources/<int:id>/click', methods=['PUT'])
-def update_resource_click(id):
-    return add_click(id)
+def update_resource_click(resource_id):
+    return add_click(resource_id)
 
 
 @latency_summary.time()
@@ -99,8 +100,8 @@ def languages():
 @latency_summary.time()
 @failures_counter.count_exceptions()
 @bp.route('/languages/<int:id>', methods=['GET'], endpoint='get_language')
-def language(id):
-    return get_language(id)
+def language(resource_id):
+    return get_language(resource_id)
 
 
 @latency_summary.time()
@@ -113,8 +114,8 @@ def categories():
 @latency_summary.time()
 @failures_counter.count_exceptions()
 @bp.route('/categories/<int:id>', methods=['GET'], endpoint='get_category')
-def category(id):
-    return get_category(id)
+def category(resource_id):
+    return get_category(resource_id)
 
 
 @latency_summary.time()
@@ -139,24 +140,24 @@ def apikey():
 
     try:
         # We need to check the database for an existing key
-        apikey = Key.query.filter_by(email=email).first()
-        if not apikey:
+        service_api_key = Key.query.filter_by(email=email).first()
+        if not service_api_key:
             # Since they're already authenticated by is_oc_user(), we know we
             # can generate an API key for them if they don't already have one
             return utils.create_new_apikey(email, logger)
-        logger.info(apikey.serialize)
-        return utils.standardize_response(payload=dict(data=apikey.serialize))
+        logger.info(service_api_key.serialize)
+        return utils.standardize_response(payload=dict(data=service_api_key.serialize))
     except Exception as e:
         logger.exception(e)
         return utils.standardize_response(status_code=500)
 
 
 # Helpers
-def get_resource(id):
-    resource = Resource.query.get(id)
+def get_resource(resource_id):
+    found_resource = Resource.query.get(resource_id)
 
-    if resource:
-        return utils.standardize_response(payload=dict(data=(resource.serialize)))
+    if found_resource:
+        return utils.standardize_response(payload=dict(data=found_resource.serialize))
 
     return redirect('/404')
 
@@ -173,37 +174,37 @@ def get_resources():
     resource_paginator = utils.Paginator(Config.RESOURCE_PAGINATOR, request)
 
     # Fetch the filter params from the url, if they were provided.
-    languages = request.args.getlist('languages')
-    category = request.args.get('category')
+    resources_languages = request.args.getlist('languages')
+    resources_category = request.args.get('category')
     updated_after = request.args.get('updated_after')
     paid = request.args.get('paid')
 
     q = Resource.query
 
     # Filter on languages
-    if languages:
+    if resources_languages:
         # Take the list of languages they pass in, join them all with OR
         q = q.filter(
             or_(*map(Resource.languages.any,
-                map(Language.name.ilike, languages))
+                map(Language.name.ilike, resources_languages))
                 )
             )
 
     # Filter on category
-    if category:
+    if resources_category:
         q = q.filter(
             Resource.category.has(
-                func.lower(Category.name) == category.lower()
+                func.lower(Category.name) == resources_category.lower()
             )
         )
 
     # Filter on updated_after
     if updated_after:
         try:
-            uaDate = parser.parse(updated_after)
-            if uaDate > datetime.now():
+            ua_date = parser.parse(updated_after)
+            if ua_date > datetime.now():
                 raise Exception("updated_after greater than today's date")
-            uaDate = uaDate.strftime("%Y-%m-%d")
+            ua_date = ua_date.strftime("%Y-%m-%d")
         except Exception as e:
             logger.exception(e)
             message = 'The value for "updated_after" is invalid'
@@ -212,22 +213,22 @@ def get_resources():
 
         q = q.filter(
             or_(
-                Resource.created_at >= uaDate,
-                Resource.last_updated >= uaDate
+                Resource.created_at >= ua_date,
+                Resource.last_updated >= ua_date
             )
         )
 
     # Filter on paid
     if isinstance(paid, str) and paid.lower() in ['true', 'false']:
-        paidAsBool = paid.lower() == 'true'
-        q = q.filter(Resource.paid == paidAsBool)
+        paid_as_bool = paid.lower() == 'true'
+        q = q.filter(Resource.paid == paid_as_bool)
 
     try:
         paginated_resources = resource_paginator.paginated_data(q)
         if not paginated_resources:
             return redirect('/404')
         resource_list = [
-            resource.serialize for resource in paginated_resources.items
+            list_resource.serialize for list_resource in paginated_resources.items
         ]
         pagination_details = resource_paginator.pagination_details(paginated_resources)
     except Exception as e:
@@ -246,8 +247,8 @@ def search_results():
 
     # Fetch the filter params from the url, if they were provided.
     paid = request.args.get('paid')
-    category = request.args.get('category')
-    languages = request.args.getlist('languages')
+    search_category = request.args.get('category')
+    search_languages = request.args.getlist('languages')
     filters = []
 
     # Filter on paid
@@ -260,18 +261,18 @@ def search_results():
             filters.append('paid=0')
 
     # Filter on category
-    if isinstance(category, str):
+    if isinstance(search_category, str):
         filters.append(
-            f"category:{category}"
+            f"category:{search_category}"
         )
 
     # Filter on languages
-    if isinstance(languages, list):
-        for i, _ in enumerate(languages):
-            languages[i] = f"languages:{languages[i]}"
+    if isinstance(search_languages, list):
+        for i, _ in enumerate(search_languages):
+            search_languages[i] = f"languages:{search_languages[i]}"
 
         # joining all possible language values to algolia filter query
-        filters.append(f"( {' OR '.join(languages)} )")
+        filters.append(f"( {' OR '.join(search_languages)} )")
 
     try:
         search_result = index.search(f'{term}', {
@@ -309,7 +310,7 @@ def get_languages():
         if not paginated_languages:
             return redirect('/404')
         language_list = [
-            language.serialize for language in paginated_languages.items
+            list_language.serialize for list_language in paginated_languages.items
         ]
         pagination_details = language_paginator.pagination_details(paginated_languages)
     except Exception as e:
@@ -321,11 +322,11 @@ def get_languages():
         **pagination_details))
 
 
-def get_language(id):
-    language = Language.query.get(id)
+def get_language(language_id):
+    found_language = Language.query.get(language_id)
 
-    if language:
-        return utils.standardize_response(payload=dict(data=(language.serialize)))
+    if found_language:
+        return utils.standardize_response(payload=dict(data=found_language.serialize))
 
     return redirect('/404')
 
@@ -339,7 +340,7 @@ def get_categories():
         if not paginated_categories:
             return redirect('/404')
         category_list = [
-            category.serialize for category in paginated_categories.items
+            list_category.serialize for list_category in paginated_categories.items
         ]
         pagination_details = category_paginator.pagination_details(paginated_categories)
     except Exception as e:
@@ -351,11 +352,11 @@ def get_categories():
         **pagination_details))
 
 
-def get_category(id):
-    category = Category.query.get(id)
+def get_category(category_id):
+    found_category = Category.query.get(category_id)
 
-    if category:
-        return utils.standardize_response(payload=dict(data=(category.serialize)))
+    if found_category:
+        return utils.standardize_response(payload=dict(data=found_category.serialize))
 
     return redirect('/404')
 
@@ -369,63 +370,63 @@ def get_attributes(json):
 
     langs = []
     for lang in json.get('languages') or []:
-        language = language_dict.get(lang)
-        if not language:
-            language = Language(name=lang)
-        langs.append(language)
+        attrs_language = language_dict.get(lang)
+        if not attrs_language:
+            attrs_language = Language(name=lang)
+        langs.append(attrs_language)
     categ = category_dict.get(json.get('category'), Category(name=json.get('category')))
-    return (langs, categ)
+    return langs, categ
 
 
-def update_votes(id, vote_direction):
+def update_votes(votes_id, vote_direction):
 
-    resource = Resource.query.get(id)
+    votes_resource = Resource.query.get(votes_id)
 
-    if not resource:
+    if not votes_resource:
         return redirect('/404')
 
-    initial_count = getattr(resource, vote_direction)
-    setattr(resource, vote_direction, initial_count+1)
+    initial_count = getattr(votes_resource, vote_direction)
+    setattr(votes_resource, vote_direction, initial_count+1)
     db.session.commit()
 
-    return utils.standardize_response(payload=dict(data=resource.serialize))
+    return utils.standardize_response(payload=dict(data=votes_resource.serialize))
 
 
-def add_click(id):
-    resource = Resource.query.get(id)
+def add_click(click_id):
+    click_resource = Resource.query.get(click_id)
 
-    if not resource:
+    if not click_resource:
         return redirect('/404')
 
-    initial_count = getattr(resource, 'times_clicked')
-    setattr(resource, 'times_clicked', initial_count + 1)
+    initial_count = getattr(click_resource, 'times_clicked')
+    setattr(click_resource, 'times_clicked', initial_count + 1)
     db.session.commit()
 
-    return utils.standardize_response(payload=dict(data=resource.serialize))
+    return utils.standardize_response(payload=dict(data=click_resource.serialize))
 
 
-def update_resource(id, json, db):
-    resource = Resource.query.get(id)
+def update_resource(resource_id, json, db_instance):
+    updateable_resource = Resource.query.get(resource_id)
 
-    if not resource:
+    if not updateable_resource:
         return redirect('/404')
 
     langs, categ = get_attributes(json)
-    index_object = {'objectID': id}
+    index_object = {'objectID': resource_id}
 
     try:
-        logger.info(f"Updating resource. Old data: {resource.serialize}")
+        logger.info(f"Updating resource. Old data: {updateable_resource.serialize}")
         if json.get('languages'):
-            resource.languages = langs
-            index_object['languages'] = resource.serialize['languages']
+            updateable_resource.languages = langs
+            index_object['languages'] = updateable_resource.serialize['languages']
         if json.get('category'):
-            resource.category = categ
+            updateable_resource.category = categ
             index_object['category'] = categ.name
         if json.get('name'):
-            resource.name = json.get('name')
+            updateable_resource.name = json.get('name')
             index_object['name'] = json.get('name')
         if json.get('url'):
-            resource.url = json.get('url')
+            updateable_resource.url = json.get('url')
             index_object['url'] = json.get('url')
         if 'paid' in json:
             paid = json.get('paid')
@@ -433,23 +434,23 @@ def update_resource(id, json, db):
             # Converts "false" and "true" to their bool
             if type(paid) is str and paid.lower() in ["true", "false"]:
                 paid = paid.lower().strip() == "true"
-            resource.paid = paid
+            updateable_resource.paid = paid
             index_object['paid'] = paid
         if 'notes' in json:
-            resource.notes = json.get('notes')
+            updateable_resource.notes = json.get('notes')
             index_object['notes'] = json.get('notes')
 
-        db.session.commit()
+        db_instance.session.commit()
 
         try:
             index.partial_update_object(index_object)
 
         except (AlgoliaUnreachableHostException, AlgoliaException) as e:
             logger.exception(e)
-            print(f"Algolia failed to update index for resource '{resource.name}'")
+            print(f"Algolia failed to update index for resource '{updateable_resource.name}'")
 
         return utils.standardize_response(
-            payload=dict(data=resource.serialize)
+            payload=dict(data=updateable_resource.serialize)
             )
 
     except IntegrityError as e:
@@ -461,8 +462,9 @@ def update_resource(id, json, db):
         return utils.standardize_response(status_code=500)
 
 
-def create_resource(json, db):
+def create_resource(json, db_instance):
     langs, categ = get_attributes(json)
+    # TODO I think this is not the right argument to pass. Resource as it is currently defined expects a TimestampMixin, as the first arg
     new_resource = Resource(
         name=json.get('name'),
         url=json.get('url'),
@@ -472,8 +474,8 @@ def create_resource(json, db):
         notes=json.get('notes'))
 
     try:
-        db.session.add(new_resource)
-        db.session.commit()
+        db_instance.session.add(new_resource)
+        db_instance.session.commit()
         index.save_object(new_resource.serialize_algolia_search)
 
     except (AlgoliaUnreachableHostException, AlgoliaException) as e:
