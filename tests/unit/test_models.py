@@ -1,7 +1,7 @@
-import pytest
-from tests import conftest
-from app.models import Resource, Language, Category, Key
 from datetime import datetime
+
+from app.models import Resource, Language, Category, Key
+
 
 def test_resource():
     resource = Resource(
